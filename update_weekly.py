@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-미래에셋증권 일산WM - 마스터 전략 덱(base_deck.pptx) + 주간 자동 업데이트 리포트 병합 엔진
-- 앞부분(1~12p): 고정 마스터 전략 슬라이드(base_deck.pptx) 유지
-- 뒷부분(13p~):
-  · 13p: PART 05 주간 자동 업데이트 섹션 간지
-  · 14p: 모델 포트폴리오 10종목 주간(1W)·월간(1M)·누적 수익률 & 옵션·13F 수급 통합 대시보드
-  · 15p: 5대 주도 업종 25종목 스캔 (1/2 · 1~3번 업종 15종목, 업종순 정렬)
-  · 16p: 5대 주도 업종 25종목 스캔 (2/2 · 4~5번 업종 10종목 + 업종별 평균 수익률 비교표)
-  · 17p: 미래에셋증권 일산WM 클로징 슬라이드
+미래에셋증권 일산WM - 마스터 전략 덱(base_deck.pptx) + 주간 자동 업데이트 리포트 병합 엔진 v2.0
+- 1~12p : 고정 마스터 전략 슬라이드(base_deck.pptx) 유지
+- 13p   : PART 05 주간 자동 업데이트 섹션 간지
+- 14p   : [신규] 이번 주 핵심 수급·수익률 브리핑 요약 슬라이드 (자동 코멘트 생성)
+- 15p   : 모델 포트폴리오 10종목 주간(1W)·월간(1M)·누적 수익률 & 옵션·13F 수급 통합 대시보드
+- 16p   : 5대 주도 업종 25종목 스캔 (1/2 · 1~3번 업종 15종목, 업종순 정렬)
+- 17p   : 5대 주도 업종 25종목 스캔 (2/2 · 4~5번 업종 10종목 & 업종별 평균 수익률 비교표)
+- 18p   : 미래에셋증권 일산WM 클로징 슬라이드
 """
 
 import os
@@ -41,7 +41,6 @@ def hex_to_rgb(hex_str: str) -> RGBColor:
 
 
 def clean_signal_text(sig: str) -> str:
-    """PowerPoint 기본 폰트에서 깨지는 특수 이모지를 깔끔한 텍스트 태그로 변환"""
     if "공격적" in sig:
         return "[강세] 콜옵션 집중 매수"
     if "콜 우위" in sig:
@@ -150,6 +149,52 @@ def compute_portfolio_summary(df: pd.DataFrame) -> dict:
         "spy_cum": spy["Cum_Return"],
         "alpha_vs_spy": port_cum - spy["Cum_Return"],
     }
+
+
+def build_weekly_commentary(merged_df: pd.DataFrame, watch_df: pd.DataFrame, summary: dict) -> list[tuple[str, str]]:
+    """데이터 기반 주간 브리핑 4대 핵심 포인트 자동 생성"""
+    non_etf = merged_df[~merged_df["Ticker"].isin(["SPY", "QQQ"])].copy()
+    best_1w = non_etf.sort_values("1W_Return", ascending=False).iloc[0]
+    worst_1w = non_etf.sort_values("1W_Return", ascending=True).iloc[0]
+
+    top_call_df = non_etf.sort_values("Call_Put_Vol_Ratio", ascending=False).head(3)
+    call_str = ", ".join([f"{r['Ticker']}({r['Call_Put_Vol_Ratio']:.2f}x)" for _, r in top_call_df.iterrows()])
+
+    top_hf_df = non_etf.sort_values(["HF_Call_Count", "HF_Hold_Count"], ascending=False).head(3)
+    hf_str = ", ".join([f"{r['Ticker']}(보유 {int(r['HF_Hold_Count'])}곳·콜 {int(r['HF_Call_Count'])}곳)" for _, r in top_hf_df.iterrows()])
+
+    if not watch_df.empty:
+        sec_perf = watch_df.groupby("Sector", as_index=False)[["1W", "Cum"]].mean().sort_values("1W", ascending=False)
+        best_sec = sec_perf.iloc[0]
+        sec_text = (
+            f"5대 주도 업종 중 주간 상대강도 1위는 '{best_sec['Sector']}'(주간 평균 {best_sec['1W']*100:+.2f}%, 누적 평균 {best_sec['Cum']*100:+.2f}%)입니다. "
+            f"2025년 이후 누적 기준으로는 병목 인프라·방어 로테이션 축이 포트폴리오 초과수익({summary['alpha_vs_spy']*100:+.2f}%p vs SPY)을 견인하고 있습니다."
+        )
+    else:
+        sec_text = f"포트폴리오 누적 수익률은 {summary['port_cum']*100:+.2f}%로 S&P 500 대비 {summary['alpha_vs_spy']*100:+.2f}%p 초과 성과를 기록 중입니다."
+
+    return [
+        (
+            "01 · 주간 포트폴리오 수익률 및 주도주 점검",
+            f"기준일({summary['as_of']}) 모델 포트폴리오는 주간 {summary['port_1w']*100:+.2f}%(SPY {summary['spy_1w']*100:+.2f}%), "
+            f"2025년 이후 누적 {summary['port_cum']*100:+.2f}%(1억 원 기준 평가액 {summary['eval_krw']/10000:,.0f}만 원)를 기록했습니다. "
+            f"주간 상대 강세 종목은 {best_1w['Ticker']}({best_1w['1W_Return']*100:+.2f}%), 변동성 확대 종목은 {worst_1w['Ticker']}({worst_1w['1W_Return']*100:+.2f}%)입니다."
+        ),
+        (
+            "02 · 단기 옵션 매매동향 (콜/풋 비율 & 감마 수급)",
+            f"근월물~차월물 4개 만기 옵션 체인 스캔 결과, 콜옵션 매수 우위가 뚜렷한 상위 종목은 {call_str} 순으로 나타났습니다. "
+            f"콜/풋 거래량 비율 1.5x 이상과 이상 거래량(거래량 > 미결제약정)이 동반된 종목은 단기 딜러 델타 헤지 매수 유입 가능성을 시사합니다."
+        ),
+        (
+            "03 · 중기 대형 헤지펀드 SEC 13F 포지션 집중도",
+            f"주요 8대 멀티매니저·마켓메이커(Citadel, Millennium, Point72, Jane Street, SIG 등)의 최신 Form 13F 공시 집계 결과, "
+            f"기관 현물 및 콜옵션 동시 선호도가 높은 핵심 종목은 {hf_str}입니다."
+        ),
+        (
+            "04 · 5대 주도 업종 로테이션 & 다음 주 대응 전략",
+            sec_text
+        ),
+    ]
 
 
 def save_excel_history(merged_df: pd.DataFrame, watch_df: pd.DataFrame, filing_df: pd.DataFrame, summary: dict) -> str:
@@ -271,7 +316,39 @@ def generate_merged_pptx(merged_df: pd.DataFrame, watch_df: pd.DataFrame, summar
     p_main.font.color.rgb = white
     p_main.space_before = Pt(14)
 
-    # [슬라이드 14] 포트폴리오 10종목 주간·월간·누적 수익률 & 옵션·13F 수급 대시보드
+    # [슬라이드 14 - 신규] 이번 주 핵심 수급·수익률 브리핑 요약 슬라이드
+    s_brief = prs.slides.add_slide(blank_layout)
+    s_brief.background.fill.solid()
+    s_brief.background.fill.fore_color.rgb = light_bg
+
+    bhdr = s_brief.shapes.add_textbox(Inches(0.6), Inches(0.35), Inches(12.1), Inches(0.6))
+    bhp = bhdr.text_frame.paragraphs[0]
+    bhp.text = f"05 · 주간 핵심 수급 · 수익률 인사이트 요약 ({summary['as_of']} 마감 기준)"
+    bhp.font.size = Pt(21)
+    bhp.font.bold = True
+    bhp.font.color.rgb = navy
+
+    insights = build_weekly_commentary(merged_df, watch_df, summary)
+    for idx, (title_txt, body_txt) in enumerate(insights):
+        top_y = Inches(1.15 + idx * 1.48)
+        box = s_brief.shapes.add_shape(1, Inches(0.6), top_y, Inches(12.13), Inches(1.32))
+        box.fill.solid()
+        box.fill.fore_color.rgb = white
+        box.line.color.rgb = orange if idx % 2 == 0 else navy
+        btf = box.text_frame
+        btf.word_wrap = True
+        bp0 = btf.paragraphs[0]
+        bp0.text = title_txt
+        bp0.font.size = Pt(13)
+        bp0.font.bold = True
+        bp0.font.color.rgb = orange if idx % 2 == 0 else navy
+        bp1 = btf.add_paragraph()
+        bp1.text = body_txt
+        bp1.font.size = Pt(11.5)
+        bp1.font.color.rgb = dark_text
+        bp1.space_before = Pt(4)
+
+    # [슬라이드 15] 포트폴리오 10종목 주간·월간·누적 수익률 & 옵션·13F 수급 대시보드
     s_port = prs.slides.add_slide(blank_layout)
     s_port.background.fill.solid()
     s_port.background.fill.fore_color.rgb = light_bg
@@ -350,11 +427,10 @@ def generate_merged_pptx(merged_df: pd.DataFrame, watch_df: pd.DataFrame, summar
             p.font.color.rgb = dark_text
             p.alignment = PP_ALIGN.CENTER
 
-    # [슬라이드 15 & 16] 5대 주도 업종 25종목을 업종 순서(1~5번)대로 깔끔하게 2장에 분배
+    # [슬라이드 16 & 17] 5대 주도 업종 25종목을 업종 순서(1~5번)대로 깔끔하게 2장에 분배
     if not watch_df.empty:
         watch_sorted = watch_df.sort_values(by=["Sector_Idx", "Rank"]).reset_index(drop=True)
 
-        # 15페이지: 1~3번 업종 (15종목)
         part1_df = watch_sorted[watch_sorted["Sector_Idx"].isin([1, 2, 3])].reset_index(drop=True)
         s_w1 = prs.slides.add_slide(blank_layout)
         s_w1.background.fill.solid()
@@ -369,7 +445,6 @@ def generate_merged_pptx(merged_df: pd.DataFrame, watch_df: pd.DataFrame, summar
 
         render_watchlist_table(s_w1, part1_df, 1.0, 6.0, navy, white, dark_text, zebra_bg)
 
-        # 16페이지: 4~5번 업종 (10종목) + 업종별 평균 수익률 요약표
         part2_df = watch_sorted[watch_sorted["Sector_Idx"].isin([4, 5])].reset_index(drop=True)
         s_w2 = prs.slides.add_slide(blank_layout)
         s_w2.background.fill.solid()
@@ -384,7 +459,6 @@ def generate_merged_pptx(merged_df: pd.DataFrame, watch_df: pd.DataFrame, summar
 
         render_watchlist_table(s_w2, part2_df, 1.0, 3.85, navy, white, dark_text, zebra_bg)
 
-        # 하단: 5대 업종별 균등 평균 수익률 요약 표
         sec_avg = (
             watch_sorted.groupby(["Sector_Idx", "Sector"], as_index=False)[["1W", "1M", "Cum"]]
             .mean()
@@ -427,7 +501,7 @@ def generate_merged_pptx(merged_df: pd.DataFrame, watch_df: pd.DataFrame, summar
                 p.font.color.rgb = dark_text
                 p.alignment = PP_ALIGN.LEFT if c_idx == 0 else PP_ALIGN.CENTER
 
-    # [슬라이드 17] 미래에셋증권 일산WM 통합 클로징 슬라이드
+    # [슬라이드 18] 미래에셋증권 일산WM 통합 클로징 슬라이드
     s_end = prs.slides.add_slide(blank_layout)
     s_end.background.fill.solid()
     s_end.background.fill.fore_color.rgb = orange
@@ -472,7 +546,7 @@ def main():
 
     merged_df = ret_df.merge(opt_df, on="Ticker", how="left").merge(hf_df, on="Ticker", how="left")
 
-    print("4/4 Excel 누적 히스토리 및 통합 PPTX(앞 전략장표 + 뒤 주간업데이트) 저장 중...")
+    print("4/4 Excel 누적 히스토리 및 통합 PPTX(앞 전략장표 + 주간 요약 + 수급 상세) 저장 중...")
     excel_file = save_excel_history(merged_df, watch_df, filing_df, summary)
     pptx_file = generate_merged_pptx(merged_df, watch_df, summary)
     print(f"[완료] Excel: {excel_file}")
