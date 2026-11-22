@@ -1,13 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-미래에셋증권 일산WM - 헤지펀드 13F · 옵션 매매동향 · 수익률 통합 트래커 v2.0 (Streamlit)
+미래에셋증권 일산WM - 헤지펀드 13F · 옵션 매매동향 · 수익률 통합 트래커 (Streamlit)
 """
 
 import os
 import pandas as pd
 import streamlit as st
 from config import BRANCH_NAME, PORTFOLIO
-from update_weekly import main as run_weekly_update, build_weekly_commentary, OUTPUT_DIR
+
+OUTPUT_DIR = "output"
 
 st.set_page_config(page_title=f"{BRANCH_NAME} 수급·수익률 트래커", layout="wide")
 
@@ -41,40 +42,103 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-if st.button("🔄 지금 즉시 주가 · 옵션 수급 · 13F 공시 & 통합 PPTX 업데이트", type="primary"):
-    with st.spinner("미국 증시 종가, 옵션 체인, SEC 13F 공시 데이터를 수집 중입니다..."):
-        run_weekly_update()
-    st.success("최신 주간 요약 브리핑과 통합 PPTX 리포트(1~18p)가 업데이트되었습니다!")
+st.info("💡 주간 데이터와 통합 PPTX 파일은 매주 일요일 오전 9시(KST) GitHub Actions가 자동으로 수집해 저장소(output/)에 업데이트합니다.")
 
 excel_path = os.path.join(OUTPUT_DIR, "ilsan_wm_weekly_history.xlsx")
-if not os.path.exists(excel_path):
-    run_weekly_update()
 
-hist_df = pd.read_excel(excel_path, sheet_name="Weekly_History")
-flow_df = pd.read_excel(excel_path, sheet_name="Latest_Flow_And_Returns")
-filing_df = pd.read_excel(excel_path, sheet_name="HedgeFund_13F_Logs")
-watch_df = pd.read_excel(excel_path, sheet_name="Sector_25_Watchlist") if "Sector_25_Watchlist" in pd.ExcelFile(excel_path).sheet_names else pd.DataFrame()
+if not os.path.exists(excel_path):
+    st.warning("아직 `output/ilsan_wm_weekly_history.xlsx` 파일이 없습니다. GitHub Actions에서 워크플로우를 한 번 실행해 주세요.")
+    st.stop()
+
+xl_file = pd.ExcelFile(excel_path)
+hist_df = pd.read_excel(xl_file, sheet_name="Weekly_History")
+flow_df = pd.read_excel(xl_file, sheet_name="Latest_Flow_And_Returns")
+filing_df = (
+    pd.read_excel(xl_file, sheet_name="HedgeFund_13F_Logs")
+    if "HedgeFund_13F_Logs" in xl_file.sheet_names
+    else pd.DataFrame()
+)
+watch_df = (
+    pd.read_excel(xl_file, sheet_name="Sector_25_Watchlist")
+    if "Sector_25_Watchlist" in xl_file.sheet_names
+    else pd.DataFrame()
+)
+
 latest = hist_df.iloc[-1]
 
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("주간 수익률 (1W)", f"{latest['Port_1W']:+.2f}%")
 c2.metric("월간 수익률 (1M)", f"{latest['Port_1M']:+.2f}%")
-c3.metric("누적 수익률 (2025~)", f"{latest['Port_Cum']:+.2f}%", f"SPY 대비 {latest['Alpha_vs_SPY_p']:+.2f}%p")
-c4.metric("1억 원 투자 현재 평가액", f"{latest['Eval_KRW_Man']:,.0f}만 원", f"기준일: {latest['Market_AsOf']}")
+c3.metric(
+    "누적 수익률 (2025~)",
+    f"{latest['Port_Cum']:+.2f}%",
+    f"SPY 대비 {latest['Alpha_vs_SPY_p']:+.2f}%p",
+)
+c4.metric(
+    "1억 원 투자 현재 평가액",
+    f"{latest['Eval_KRW_Man']:,.0f}만 원",
+    f"기준일: {latest['Market_AsOf']}",
+)
 
-summary_dict = {
-    "as_of": latest["Market_AsOf"],
-    "port_1w": latest["Port_1W"] / 100.0,
-    "port_1m": latest["Port_1M"] / 100.0,
-    "port_cum": latest["Port_Cum"] / 100.0,
-    "eval_krw": latest["Eval_KRW_Man"] * 10000.0,
-    "spy_1w": flow_df.loc[flow_df["Ticker"] == "SPY", "1W_Return"].iloc[0],
-    "alpha_vs_spy": latest["Alpha_vs_SPY_p"] / 100.0,
-}
 
-with st.expander("📝 이번 주 핵심 수급·수익률 자동 브리핑 요약 보기", expanded=True):
-    for title_txt, body_txt in build_weekly_commentary(flow_df, watch_df, summary_dict):
-        st.markdown(f'<div class="insight-card"><strong>{title_txt}</strong><br><span style="font-size:0.95rem;">{body_txt}</span></div>', unsafe_allow_html=True)
+def build_cards(df_flow: pd.DataFrame, df_watch: pd.DataFrame, row_latest: pd.Series) -> list[tuple[str, str]]:
+    cards = []
+    if not df_flow.empty and "1W_Return" in df_flow.columns:
+        non_etf = df_flow[~df_flow["Ticker"].isin(["SPY", "QQQ"])].copy()
+        if non_etf.empty:
+            non_etf = df_flow.copy()
+        best_1w = non_etf.sort_values("1W_Return", ascending=False).iloc[0]
+        worst_1w = non_etf.sort_values("1W_Return", ascending=True).iloc[0]
+        cards.append((
+            "01 · 주간 포트폴리오 수익률 및 주도주 점검",
+            f"기준일({row_latest['Market_AsOf']}) 모델 포트폴리오는 주간 {row_latest['Port_1W']:+.2f}%, "
+            f"2025년 이후 누적 {row_latest['Port_Cum']:+.2f}%(1억 원 기준 {row_latest['Eval_KRW_Man']:,.0f}만 원)를 기록했습니다. "
+            f"주간 상대 강세 종목은 {best_1w['Ticker']}({best_1w['1W_Return']*100:+.2f}%), "
+            f"단기 변동성 확대 종목은 {worst_1w['Ticker']}({worst_1w['1W_Return']*100:+.2f}%)입니다.",
+        ))
+
+        if "Call_Put_Vol_Ratio" in non_etf.columns:
+            top_call = non_etf.sort_values("Call_Put_Vol_Ratio", ascending=False).head(3)
+            call_txt = ", ".join([f"{r['Ticker']}({float(r['Call_Put_Vol_Ratio']):.2f}x)" for _, r in top_call.iterrows()])
+            cards.append((
+                "02 · 단기 옵션 매매동향 (콜/풋 거래량 비율)",
+                f"근월물~차월물 옵션 체인 기준 콜/풋 거래량 비율 상위 종목은 {call_txt} 순입니다. "
+                "콜 비율이 높고 거래량이 미결제약정을 웃도는 구간은 단기 상방 감마 수급 유입 여부를 함께 점검해야 합니다.",
+            ))
+
+        if "HF_Hold_Count" in non_etf.columns and "HF_Call_Count" in non_etf.columns:
+            top_hf = non_etf.sort_values(["HF_Call_Count", "HF_Hold_Count"], ascending=False).head(3)
+            hf_txt = ", ".join([
+                f"{r['Ticker']}(보유 {int(r['HF_Hold_Count'])}곳·콜 {int(r['HF_Call_Count'])}곳)"
+                for _, r in top_hf.iterrows()
+            ])
+            cards.append((
+                "03 · 중기 대형 헤지펀드 SEC 13F 포지션 현황",
+                f"주요 8대 멀티매니저·마켓메이커(Citadel, Millennium, Point72, Jane Street, SIG 등) 최신 13F 공시 기준 "
+                f"기관 보유 및 콜옵션 포지션 상위 종목은 {hf_txt}입니다.",
+            ))
+
+    if not df_watch.empty and "Sector" in df_watch.columns and "1W" in df_watch.columns:
+        sec_avg = df_watch.groupby("Sector", as_index=False)[["1W", "Cum"]].mean().sort_values("1W", ascending=False)
+        top_sec = sec_avg.iloc[0]
+        cards.append((
+            "04 · 5대 주도 업종 로테이션 요약",
+            f"5대 주도 업종 중 주간 평균 수익률 1위는 '{top_sec['Sector']}'({top_sec['1W']*100:+.2f}%, "
+            f"누적 평균 {top_sec['Cum']*100:+.2f}%)입니다.",
+        ))
+
+    return cards
+
+
+briefing_cards = build_cards(flow_df, watch_df, latest)
+if briefing_cards:
+    with st.expander("📝 이번 주 핵심 수급·수익률 자동 브리핑 요약 보기", expanded=True):
+        for title_txt, body_txt in briefing_cards:
+            st.markdown(
+                f'<div class="insight-card"><strong>{title_txt}</strong><br>'
+                f'<span style="font-size:0.95rem;">{body_txt}</span></div>',
+                unsafe_allow_html=True,
+            )
 
 tab1, tab2, tab3, tab4 = st.tabs([
     "📊 종목별 수익률 & 옵션·13F 수급",
@@ -84,49 +148,61 @@ tab1, tab2, tab3, tab4 = st.tabs([
 ])
 
 with tab1:
-    disp = flow_df[[
+    wanted_cols = [
         "Ticker", "Sector", "Weight", "1W_Return", "1M_Return", "Cum_Return",
         "Call_Put_Vol_Ratio", "Unusual_Call_Strikes", "Option_Signal",
-        "HF_Hold_Count", "HF_Call_Count", "HF_Hold_Names"
-    ]].copy()
+        "HF_Hold_Count", "HF_Call_Count", "HF_Hold_Names",
+    ]
+    avail_cols = [c for c in wanted_cols if c in flow_df.columns]
+    disp = flow_df[avail_cols].copy()
     for col in ["Weight", "1W_Return", "1M_Return", "Cum_Return"]:
-        disp[col] = disp[col].map(lambda x: f"{x*100:+.2f}%" if col != "Weight" else f"{x*100:.0f}%")
+        if col in disp.columns:
+            disp[col] = disp[col].map(
+                lambda x: f"{float(x)*100:+.2f}%" if col != "Weight" else f"{float(x)*100:.0f}%"
+            )
     st.dataframe(disp, use_container_width=True, hide_index=True)
 
 with tab2:
-    st.dataframe(filing_df, use_container_width=True, hide_index=True)
+    if not filing_df.empty:
+        st.dataframe(filing_df, use_container_width=True, hide_index=True)
+    else:
+        st.info("13F 공시 로그 시트가 아직 없습니다.")
 
 with tab3:
-    st.line_chart(hist_df.set_index("Market_AsOf")[["Port_Cum", "SPY_Cum"]])
+    chart_cols = [c for c in ["Port_Cum", "SPY_Cum"] if c in hist_df.columns]
+    if chart_cols and "Market_AsOf" in hist_df.columns:
+        st.line_chart(hist_df.set_index("Market_AsOf")[chart_cols])
 
 with tab4:
-    st.caption("비중(%)을 조정해 비중 합계 100%를 맞춘 뒤, 아래 생성된 config.py 코드를 복사해 GitHub에 붙여넣으면 다음 주부터 새 비중으로 자동 집계됩니다.")
-    edit_df = pd.DataFrame(PORTFOLIO)[["ticker", "cusip", "name", "sector", "weight", "eps_2027"]].copy()
+    st.caption("비중(%)을 조정해 합계 100%를 맞춘 뒤, 아래 생성된 PORTFOLIO 코드를 복사해 config.py에 반영할 수 있습니다.")
+    edit_df = pd.DataFrame(PORTFOLIO).copy()
     edit_df["weight_pct"] = edit_df["weight"] * 100.0
-    edited = st.data_editor(
-        edit_df[["ticker", "name", "sector", "weight_pct", "eps_2027", "cusip"]],
-        use_container_width=True,
-        hide_index=True,
+    cols_show = [c for c in ["ticker", "name", "sector", "weight_pct", "eps_2027", "cusip"] if c in edit_df.columns]
+    edited = st.data_editor(edit_df[cols_show], use_container_width=True, hide_index=True)
+    total_w = float(edited["weight_pct"].sum())
+    st.write(
+        f"**현재 입력된 비중 합계:** `{total_w:.1f}%` "
+        + ("✅ (100% 완료)" if abs(total_w - 100.0) < 0.01 else "⚠️ 100%에 맞춰 주세요")
     )
-    total_w = edited["weight_pct"].sum()
-    st.write(f"**현재 입력된 비중 합계:** `{total_w:.1f}%` {'✅ (정확히 100%입니다)' if abs(total_w - 100.0) < 0.01 else '⚠️ 합계가 100%가 되도록 조정해 주세요'}")
 
     lines = ["PORTFOLIO = ["]
     for _, r in edited.iterrows():
         lines.append(
-            f'    {{"ticker": "{r["ticker"]}", "cusip": "{r["cusip"]}", "name": "{r["name"]}", '
-            f'"sector": "{r["sector"]}", "weight": {round(r["weight_pct"]/100.0, 4)}, "eps_2027": "{r["eps_2027"]}"}},'
+            f'    {{"ticker": "{r.get("ticker", "")}", "cusip": "{r.get("cusip", "")}", '
+            f'"name": "{r.get("name", "")}", "sector": "{r.get("sector", "")}", '
+            f'"weight": {round(float(r.get("weight_pct", 0))/100.0, 4)}, "eps_2027": "{r.get("eps_2027", "")}"}},'
         )
     lines.append("]")
     st.code("\n".join(lines), language="python")
 
-pptx_files = sorted([f for f in os.listdir(OUTPUT_DIR) if f.startswith("mirae_ilsan_wm_integrated_report_") and f.endswith(".pptx")])
-if pptx_files:
-    latest_pptx = os.path.join(OUTPUT_DIR, pptx_files[-1])
-    with open(latest_pptx, "rb") as f:
-        st.download_button(
-            label=f"📥 최신 일산WM 통합 PPTX 리포트 다운로드 (1~18p · {pptx_files[-1]})",
-            data=f,
-            file_name=pptx_files[-1],
-            mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-        )
+if os.path.exists(OUTPUT_DIR):
+    pptx_files = sorted([f for f in os.listdir(OUTPUT_DIR) if f.endswith(".pptx")])
+    if pptx_files:
+        latest_pptx = os.path.join(OUTPUT_DIR, pptx_files[-1])
+        with open(latest_pptx, "rb") as f:
+            st.download_button(
+                label=f"📥 최신 일산WM 주간 PPTX 다운로드 ({pptx_files[-1]})",
+                data=f,
+                file_name=pptx_files[-1],
+                mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            )
