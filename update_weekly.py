@@ -2,11 +2,15 @@
 """
 미래에셋증권 일산WM - 마스터 전략 덱(base_deck.pptx) + 주간 자동 업데이트 리포트 병합 엔진
 - 앞부분(1~12p): 고정 마스터 전략 슬라이드(base_deck.pptx) 유지
-- 뒷부분(13p~): 매주 일요일 자동 수집된 주간(1W)·월간(1M)·누적 수익률 + 옵션 수급 + SEC 13F + 25종목 업종 스캔 슬라이드 자동 부착
+- 뒷부분(13p~):
+  · 13p: PART 05 주간 자동 업데이트 섹션 간지
+  · 14p: 모델 포트폴리오 10종목 주간(1W)·월간(1M)·누적 수익률 & 옵션·13F 수급 통합 대시보드
+  · 15p: 5대 주도 업종 25종목 스캔 (1/2 · 1~3번 업종 15종목, 업종순 정렬)
+  · 16p: 5대 주도 업종 25종목 스캔 (2/2 · 4~5번 업종 10종목 + 업종별 평균 수익률 비교표)
+  · 17p: 미래에셋증권 일산WM 클로징 슬라이드
 """
 
 import os
-import copy
 from datetime import datetime, timedelta
 import pandas as pd
 import yfinance as yf
@@ -34,6 +38,19 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 def hex_to_rgb(hex_str: str) -> RGBColor:
     return RGBColor(int(hex_str[0:2], 16), int(hex_str[2:4], 16), int(hex_str[4:6], 16))
+
+
+def clean_signal_text(sig: str) -> str:
+    """PowerPoint 기본 폰트에서 깨지는 특수 이모지를 깔끔한 텍스트 태그로 변환"""
+    if "공격적" in sig:
+        return "[강세] 콜옵션 집중 매수"
+    if "콜 우위" in sig:
+        return "[우위] 상방 베팅 지속"
+    if "중립" in sig:
+        return "[중립] 양방향 균형"
+    if "풋 헤지" in sig:
+        return "[경계] 풋 헤지 증가"
+    return sig
 
 
 def fetch_price_history(tickers: list[str], start_date: str) -> pd.DataFrame:
@@ -81,8 +98,8 @@ def compute_period_returns(prices: pd.DataFrame) -> pd.DataFrame:
 def compute_watchlist_returns(prices: pd.DataFrame) -> pd.DataFrame:
     latest_date = prices.index[-1]
     rows = []
-    for sector_name, tickers in WATCHLIST_5_SECTORS.items():
-        for t in tickers:
+    for sector_idx, (sector_name, tickers) in enumerate(WATCHLIST_5_SECTORS.items(), start=1):
+        for rank_in_sec, t in enumerate(tickers, start=1):
             if t not in prices.columns:
                 continue
             s = prices[t].dropna()
@@ -93,6 +110,8 @@ def compute_watchlist_returns(prices: pd.DataFrame) -> pd.DataFrame:
             p_1w = float(s.iloc[-6]) if len(s) >= 6 else p_start
             p_1m = float(s.iloc[-22]) if len(s) >= 22 else p_start
             rows.append({
+                "Sector_Idx": sector_idx,
+                "Rank": rank_in_sec,
                 "Sector": sector_name,
                 "Ticker": t,
                 "Price": round(p_now, 2),
@@ -156,20 +175,60 @@ def save_excel_history(merged_df: pd.DataFrame, watch_df: pd.DataFrame, filing_d
     with pd.ExcelWriter(excel_path, engine="openpyxl") as writer:
         hist_df.to_excel(writer, sheet_name="Weekly_History", index=False)
         merged_df.to_excel(writer, sheet_name="Latest_Flow_And_Returns", index=False)
-        watch_df.to_excel(writer, sheet_name="Sector_25_Watchlist", index=False)
+        watch_df.drop(columns=["Sector_Idx", "Rank"], errors="ignore").to_excel(writer, sheet_name="Sector_25_Watchlist", index=False)
         filing_df.to_excel(writer, sheet_name="HedgeFund_13F_Logs", index=False)
 
     return excel_path
 
 
 def delete_last_slide(prs: Presentation):
-    """마스터 덱의 맨 마지막 '감사합니다' 클로징 슬라이드를 잠시 제거해 중간에 주간 리포트를 삽입할 수 있게 함"""
     xml_slides = prs.slides._sldIdLst
     slides = list(xml_slides)
     if len(slides) > 0:
         rId = slides[-1].rId
         prs.part.drop_rel(rId)
         xml_slides.remove(slides[-1])
+
+
+def render_watchlist_table(slide, df_sub: pd.DataFrame, top_inches: float, height_inches: float, navy: RGBColor, white: RGBColor, dark_text: RGBColor, zebra_bg: RGBColor):
+    tbl_shape = slide.shapes.add_table(len(df_sub) + 1, 6, Inches(0.6), Inches(top_inches), Inches(12.13), Inches(height_inches))
+    tbl = tbl_shape.table
+    col_widths = [Inches(3.73), Inches(1.4), Inches(1.75), Inches(1.75), Inches(1.75), Inches(1.75)]
+    for idx, w in enumerate(col_widths):
+        tbl.columns[idx].width = w
+
+    headers = ["소속 주도 업종 (5대 섹터)", "티커", "현재가($)", "주간(1W)", "월간(1M)", "누적(2025~)"]
+    for c_idx, h_text in enumerate(headers):
+        cell = tbl.cell(0, c_idx)
+        cell.fill.solid()
+        cell.fill.fore_color.rgb = navy
+        p = cell.text_frame.paragraphs[0]
+        p.text = h_text
+        p.font.size = Pt(10)
+        p.font.bold = True
+        p.font.color.rgb = white
+        p.alignment = PP_ALIGN.CENTER
+
+    for r_idx, (_, row) in enumerate(df_sub.iterrows()):
+        vals = [
+            row["Sector"],
+            row["Ticker"],
+            f"${row['Price']:,.2f}",
+            f"{row['1W']*100:+.2f}%",
+            f"{row['1M']*100:+.2f}%",
+            f"{row['Cum']*100:+.2f}%",
+        ]
+        bg_c = white if r_idx % 2 == 0 else zebra_bg
+        for c_idx, v in enumerate(vals):
+            cell = tbl.cell(r_idx + 1, c_idx)
+            cell.fill.solid()
+            cell.fill.fore_color.rgb = bg_c
+            p = cell.text_frame.paragraphs[0]
+            p.text = str(v)
+            p.font.size = Pt(9.5)
+            p.font.bold = (c_idx == 1)
+            p.font.color.rgb = dark_text
+            p.alignment = PP_ALIGN.LEFT if c_idx == 0 else PP_ALIGN.CENTER
 
 
 def generate_merged_pptx(merged_df: pd.DataFrame, watch_df: pd.DataFrame, summary: dict) -> str:
@@ -180,7 +239,6 @@ def generate_merged_pptx(merged_df: pd.DataFrame, watch_df: pd.DataFrame, summar
     light_bg = RGBColor(255, 248, 242)
     zebra_bg = RGBColor(255, 243, 232)
 
-    # 1. 마스터 전략 덱(base_deck.pptx)이 있으면 불러오고 마지막 '감사합니다' 슬라이드 제거 후 뒤에 이어붙임
     if os.path.exists(BASE_DECK_PATH):
         prs = Presentation(BASE_DECK_PATH)
         if len(prs.slides) >= 13:
@@ -192,7 +250,7 @@ def generate_merged_pptx(merged_df: pd.DataFrame, watch_df: pd.DataFrame, summar
 
     blank_layout = prs.slide_layouts[6]
 
-    # [추가 슬라이드 1] PART 05 간지 (주간 자동 업데이트 섹션 시작)
+    # [슬라이드 13] PART 05 간지
     sec_slide = prs.slides.add_slide(blank_layout)
     sec_slide.background.fill.solid()
     sec_slide.background.fill.fore_color.rgb = orange
@@ -213,7 +271,7 @@ def generate_merged_pptx(merged_df: pd.DataFrame, watch_df: pd.DataFrame, summar
     p_main.font.color.rgb = white
     p_main.space_before = Pt(14)
 
-    # [추가 슬라이드 2] 포트폴리오 주간·월간·누적 수익률 & 옵션·13F 통합 대시보드
+    # [슬라이드 14] 포트폴리오 10종목 주간·월간·누적 수익률 & 옵션·13F 수급 대시보드
     s_port = prs.slides.add_slide(blank_layout)
     s_port.background.fill.solid()
     s_port.background.fill.fore_color.rgb = light_bg
@@ -277,7 +335,7 @@ def generate_merged_pptx(merged_df: pd.DataFrame, watch_df: pd.DataFrame, summar
             f"{row['1M_Return']*100:+.2f}%",
             f"{row['Cum_Return']*100:+.2f}%",
             f"{row['Call_Put_Vol_Ratio']:.2f}x",
-            row["Option_Signal"],
+            clean_signal_text(str(row["Option_Signal"])),
             f"{row['HF_Hold_Count']}곳",
             f"{row['HF_Call_Count']}곳",
         ]
@@ -292,56 +350,84 @@ def generate_merged_pptx(merged_df: pd.DataFrame, watch_df: pd.DataFrame, summar
             p.font.color.rgb = dark_text
             p.alignment = PP_ALIGN.CENTER
 
-    # [추가 슬라이드 3] 5대 주도 업종 25종목 주간·월간·누적 수익률 & 옵션 스캔 요약
+    # [슬라이드 15 & 16] 5대 주도 업종 25종목을 업종 순서(1~5번)대로 깔끔하게 2장에 분배
     if not watch_df.empty:
-        s_watch = prs.slides.add_slide(blank_layout)
-        s_watch.background.fill.solid()
-        s_watch.background.fill.fore_color.rgb = light_bg
+        watch_sorted = watch_df.sort_values(by=["Sector_Idx", "Rank"]).reset_index(drop=True)
 
-        whdr = s_watch.shapes.add_textbox(Inches(0.6), Inches(0.35), Inches(12.1), Inches(0.55))
-        whp = whdr.text_frame.paragraphs[0]
-        whp.text = f"05 · 5대 주도 업종 핵심 25종목 주간·월간·누적 모멘텀 스캔 ({summary['as_of']})"
-        whp.font.size = Pt(20)
-        whp.font.bold = True
-        whp.font.color.rgb = navy
+        # 15페이지: 1~3번 업종 (15종목)
+        part1_df = watch_sorted[watch_sorted["Sector_Idx"].isin([1, 2, 3])].reset_index(drop=True)
+        s_w1 = prs.slides.add_slide(blank_layout)
+        s_w1.background.fill.solid()
+        s_w1.background.fill.fore_color.rgb = light_bg
 
-        # 상위 모멘텀 15종목 테이블 표시 (가독성 최적화)
-        top_watch = watch_df.sort_values(by="1W", ascending=False).head(15).reset_index(drop=True)
-        w_tbl_shape = s_watch.shapes.add_table(len(top_watch) + 1, 6, Inches(0.6), Inches(1.05), Inches(12.13), Inches(5.95))
-        wtbl = w_tbl_shape.table
-        wheaders = ["소속 주도 업종", "티커", "현재가($)", "주간(1W)", "월간(1M)", "누적(2025~)"]
-        for c_idx, h_text in enumerate(wheaders):
-            cell = wtbl.cell(0, c_idx)
+        wh1 = s_w1.shapes.add_textbox(Inches(0.6), Inches(0.35), Inches(12.1), Inches(0.55))
+        wp1 = wh1.text_frame.paragraphs[0]
+        wp1.text = f"05 · 5대 주도 업종 핵심 25종목 스캔 (1/2 · AI·인프라·SW 15종목) [{summary['as_of']}]"
+        wp1.font.size = Pt(19.5)
+        wp1.font.bold = True
+        wp1.font.color.rgb = navy
+
+        render_watchlist_table(s_w1, part1_df, 1.0, 6.0, navy, white, dark_text, zebra_bg)
+
+        # 16페이지: 4~5번 업종 (10종목) + 업종별 평균 수익률 요약표
+        part2_df = watch_sorted[watch_sorted["Sector_Idx"].isin([4, 5])].reset_index(drop=True)
+        s_w2 = prs.slides.add_slide(blank_layout)
+        s_w2.background.fill.solid()
+        s_w2.background.fill.fore_color.rgb = light_bg
+
+        wh2 = s_w2.shapes.add_textbox(Inches(0.6), Inches(0.35), Inches(12.1), Inches(0.55))
+        wp2 = wh2.text_frame.paragraphs[0]
+        wp2.text = f"05 · 5대 주도 업종 핵심 25종목 스캔 (2/2 · 헬스·에너지 10종목 & 업종 평균) [{summary['as_of']}]"
+        wp2.font.size = Pt(19.5)
+        wp2.font.bold = True
+        wp2.font.color.rgb = navy
+
+        render_watchlist_table(s_w2, part2_df, 1.0, 3.85, navy, white, dark_text, zebra_bg)
+
+        # 하단: 5대 업종별 균등 평균 수익률 요약 표
+        sec_avg = (
+            watch_sorted.groupby(["Sector_Idx", "Sector"], as_index=False)[["1W", "1M", "Cum"]]
+            .mean()
+            .sort_values("Sector_Idx")
+        )
+        avg_tbl_shape = s_w2.shapes.add_table(len(sec_avg) + 1, 4, Inches(0.6), Inches(5.05), Inches(12.13), Inches(2.05))
+        atbl = avg_tbl_shape.table
+        a_widths = [Inches(5.23), Inches(2.3), Inches(2.3), Inches(2.3)]
+        for idx, w in enumerate(a_widths):
+            atbl.columns[idx].width = w
+
+        aheaders = ["5대 주도 업종 (5종목 균등 평균)", "업종 주간 평균(1W)", "업종 월간 평균(1M)", "업종 누적 평균(2025~)"]
+        for c_idx, h_text in enumerate(aheaders):
+            cell = atbl.cell(0, c_idx)
             cell.fill.solid()
-            cell.fill.fore_color.rgb = navy
+            cell.fill.fore_color.rgb = orange
             p = cell.text_frame.paragraphs[0]
             p.text = h_text
-            p.font.size = Pt(10)
+            p.font.size = Pt(9.5)
             p.font.bold = True
             p.font.color.rgb = white
             p.alignment = PP_ALIGN.CENTER
 
-        for r_idx, row in top_watch.iterrows():
+        for r_idx, (_, row) in enumerate(sec_avg.iterrows()):
             vals = [
                 row["Sector"],
-                row["Ticker"],
-                f"${row['Price']:,.2f}",
                 f"{row['1W']*100:+.2f}%",
                 f"{row['1M']*100:+.2f}%",
                 f"{row['Cum']*100:+.2f}%",
             ]
             bg_c = white if r_idx % 2 == 0 else zebra_bg
             for c_idx, v in enumerate(vals):
-                cell = wtbl.cell(r_idx + 1, c_idx)
+                cell = atbl.cell(r_idx + 1, c_idx)
                 cell.fill.solid()
                 cell.fill.fore_color.rgb = bg_c
                 p = cell.text_frame.paragraphs[0]
                 p.text = str(v)
                 p.font.size = Pt(9.5)
+                p.font.bold = (c_idx > 0)
                 p.font.color.rgb = dark_text
                 p.alignment = PP_ALIGN.LEFT if c_idx == 0 else PP_ALIGN.CENTER
 
-    # [마지막 슬라이드] 미래에셋증권 일산WM 통합 클로징 슬라이드
+    # [슬라이드 17] 미래에셋증권 일산WM 통합 클로징 슬라이드
     s_end = prs.slides.add_slide(blank_layout)
     s_end.background.fill.solid()
     s_end.background.fill.fore_color.rgb = orange
